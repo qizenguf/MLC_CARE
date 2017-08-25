@@ -49,7 +49,7 @@
 #define __MEM_CACHE_TAGS_CACHESET_HH__
 
 #include <cassert>
-
+#include <algorithm>
 /**
  * An associative set of cache blocks.
  */
@@ -64,6 +64,7 @@ class CacheSet
     Blktype **blks;
 	uint8_t* m_tree;
 	int* flipBits;
+	//unordered_map<uint64_t, int>* blkMaps;
     /**
      * Find a block matching the tag in this set.
      * @param way_id The id of the way that matches the tag.
@@ -99,13 +100,24 @@ CacheSet<Blktype>::findBlk(Addr tag, bool is_secure, int& way_id) const
      */
     way_id = assoc;
     for (int i = 0; i < assoc; ++i) {
-        if (blks[i]->tag == tag && blks[i]->isValid() &&
-            blks[i]->isSecure() == is_secure) {
-            way_id = i;
-            return blks[i];
-        }
+		if ( blks[i]->isValid() && blks[i]->isSecure() == is_secure) {
+			if( blks[i]->blkCnt <= 1 && blks[i]->tag == tag){
+				blks[i]->tag2 = tag; //added by Qi
+				way_id = i;
+				return blks[i];
+			}else if (blks[i]->blkCnt > 1){
+				for(int j = 0; j<blks[i]->blkCnt; j++){
+				   if( blks[i]->cBlks[j]->isValid() && blks[i]->tags[j] == tag){
+					   blks[i]->tag2 = tag; //added by Qi
+					   way_id = i;
+					   return blks[i];
+					}
+				}
+			}			
+		}
     }
     return nullptr;
+    
 }
 
 template <class Blktype>

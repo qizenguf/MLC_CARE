@@ -52,7 +52,7 @@
  */
 
 #include "mem/cache/cache.hh"
-
+#include "mem/cache/tags/sec.hh"
 #include "base/misc.hh"
 #include "base/types.hh"
 #include "debug/Cache.hh"
@@ -63,6 +63,51 @@
 #include "mem/cache/mshr.hh"
 #include "mem/cache/prefetch/base.hh"
 #include "sim/sim_exit.hh"
+std::vector<int> extractDict(const uint8_t* ablock, unordered_map<uint64_t , int> &oldMap, int size, int entrySize, int offsetSize = 0){
+        //unordered_map<uint64_t, int> ret;
+        vector<int> ret;
+        int numEnt = size/entrySize;
+        //if(size == 65) cout<<"nearby"<<endl;
+        //else cout <<"random"<<endl;
+        for(int i = 0; i<numEnt; i++){
+            uint64_t cur = 0;
+            for(int j = 0; j<entrySize; j++) 
+                cur = ((cur<<8) | ablock[ i*entrySize + j]);
+            cur = cur >> offsetSize; // offset of each entry
+            if( oldMap.find(cur) == oldMap.end()){
+                //cout<<(uint64_t)ablock[0]<< std::hex<<"  data "<<cur<< "  dic_size " << oldMap.size() << "  offset " << offsetSize <<endl;
+                ret.push_back(oldMap.size());
+                oldMap[cur] = oldMap.size();
+                //ret.push_back(oldMap.size());
+            }else{
+                //cout<<(uint64_t)ablock[0]<< std::hex<<"  data "<<cur<< "  dic_size " << oldMap.size() << "  offset " << offsetSize <<" found"<<endl;
+                ret.push_back(oldMap[cur]);
+            }
+        }
+        return ret;     
+    }
+bool checkcompressbility(CacheBlk * b, Addr addr, PacketPtr pkt, int entSize)
+    {
+        bool ifCompress = false;
+        std::unordered_map<uint64_t, int> temp(b->dictionary); // protect the dictionary from block and make a copy
+        extractDict(pkt->getConstPtr<uint8_t>(), temp, 65, entSize, 0);
+        if(b->curScheme != 2 && temp.size() <= 8 ) {                
+            b->dictionary = temp;       
+            b->curScheme = 1;       
+            ifCompress = true;
+        }
+        std::unordered_map<uint64_t, int> temp2(b->dictionary2);
+        extractDict(pkt->getConstPtr<uint8_t>(), temp2, 65, entSize, 4);
+        if(b->curScheme != 1 && temp.size() <= 4 ) {
+
+            b->dictionary2 = temp2;
+            b->curScheme = 2;
+            ifCompress = true;
+        }
+        return ifCompress;
+        
+    }
+
 
 Cache::Cache(const CacheParams *p)
     : BaseCache(p, p->system->cacheLineSize()),
@@ -83,7 +128,7 @@ Cache::Cache(const CacheParams *p)
                                   "CpuSidePort");
     memSidePort = new MemSidePort(p->name + ".mem_side", this,
                                   "MemSidePort");
-
+    entrySize = p->entry_size;
     tags->setCache(this);
     if (prefetcher)
         prefetcher->setCache(this);
@@ -358,7 +403,7 @@ Cache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
         // We check for presence of block in above caches before issuing
         // Writeback or CleanEvict to write buffer. Therefore the only
         // possible cases can be of a CleanEvict packet coming from above
-        // encountering a Writeback generated in this cache peer cache and
+        // encountering a Writeback generated in this above cache's peer cache and
         // waiting in the write buffer. Cases of upper level peer caches
         // generating CleanEvict and Writeback or simply CleanEvict and
         // CleanEvict almost simultaneously will be caught by snoops sent out
@@ -408,9 +453,11 @@ Cache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
             return true;
         }
 
-        if (blk == nullptr) {
-            // need to do a replacement
-            blk = allocateBlock(pkt->getAddr(), pkt->isSecure(), writebacks, pkt); // modified
+        if ( blk == nullptr ) {
+			incMissCount(pkt);
+            return false;
+            // no allocation for writeback
+            blk = allocateBlock(pkt->getAddr(), pkt->isSecure(), writebacks, pkt); // modified allocate block fucntion by Qi
             if (blk == nullptr) {
                 // no replaceable block available: give up, fwd to next level.
                 incMissCount(pkt);
@@ -436,7 +483,59 @@ Cache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
         }
         // nothing else to do; writeback doesn't expect response
         assert(!pkt->needsResponse());
-        std::memcpy(blk->data, pkt->getConstPtr<uint8_t>(), blkSize);
+        bool ifCompress = false;
+        if(blk->blkCnt > 1){
+            std::unordered_map<uint64_t, int> temp(blk->cBlks[0]->dictionary); // protect the dictionary from block and make a copy
+            extractDict(pkt->getConstPtr<uint8_t>(), temp, 65, entrySize, 0);
+            if(blk->curScheme != 2 && temp.size() <= 8 ) {                
+				blk->cBlks[0]->dictionary = temp;       
+				blk->curScheme = 1;       
+				ifCompress = true;
+            }
+            std::unordered_map<uint64_t, int> temp2(blk->cBlks[0]->dictionary2);
+            extractDict(pkt->getConstPtr<uint8_t>(), temp2, 65, entrySize, 4);
+            if(blk->curScheme != 1 && temp.size() <= 4 ) {
+                blk->cBlks[0]->dictionary2 = temp2;
+                blk->curScheme = 2;
+                ifCompress = true;
+            }
+        }
+       
+        if(blk->blkCnt <= 1 or ifCompress){
+        //if(blk->blkCnt == 1 )
+			std::memcpy(blk->data, pkt->getConstPtr<uint8_t>(), blkSize); // real writebacks happen here
+		}else{
+			blk->invalidate();
+			incMissCount(pkt);
+            //writebacks.push_back(pkt);
+            
+			/*CacheBlk* b = allocateBlock(pkt->getAddr(), pkt->isSecure(), writebacks, pkt); // modified allocate block fucntion by Qi
+            if (b == nullptr) {
+                // no replaceable block available: give up, fwd to next level.
+                incMissCount(pkt);
+                return false;
+            }
+            tags->insertBlock(pkt, b);
+
+            b->status = (BlkValid | BlkReadable);
+            if (pkt->isSecure()) {
+                b->status |= BlkSecure;
+            }
+			
+        // only mark the block dirty if we got a writeback command,
+        // and leave it as is for a clean writeback
+			if (pkt->cmd == MemCmd::WritebackDirty) {
+				b->status |= BlkDirty;
+			}
+        // if the packet does not have sharers, it is passing
+        // writable, and we got the writeback in Modified or Exclusive
+        // state, if not we are in the Owned or Shared state
+			if (!pkt->hasSharers()) {
+				b->status |= BlkWritable;
+			}
+			std::memcpy(b->data, pkt->getConstPtr<uint8_t>(), blkSize);*/
+		}
+        
         if(twostep) {
             DPRINTF(CacheVerbose, "%s with two-step encoding for %s addr %#llx size %d\n",
             __func__, pkt->cmdString(), pkt->getAddr(), pkt->getSize());
@@ -1686,7 +1785,7 @@ Cache::allocateBlock(Addr addr, bool is_secure, PacketList &writebacks, PacketPt
         return nullptr;
 
     if (blk->isValid()) {
-        Addr repl_addr = tags->regenerateBlkAddr(blk->tag, blk->set);
+        Addr repl_addr = tags->regenerateBlkAddr(blk->tag, blk->set); // may need change it Qi
         MSHR *repl_mshr = mshrQueue.findMatch(repl_addr, blk->isSecure());
         if (repl_mshr) {
             // must be an outstanding upgrade request
@@ -1698,21 +1797,47 @@ Cache::allocateBlock(Addr addr, bool is_secure, PacketList &writebacks, PacketPt
             return nullptr;
         } else {
             DPRINTF(Cache, "replacement: replacing %#llx (%s) with %#llx "
-                    "(%s): %s\n", repl_addr, blk->isSecure() ? "s" : "ns",
+                    "(%s): %s blk_cnt:%d\n", repl_addr, blk->isSecure() ? "s" : "ns",
                     addr, is_secure ? "s" : "ns",
-                    blk->isDirty() ? "writeback" : "clean");
+                    blk->isDirty() ? "writeback" : "clean", blk->blkCnt);
 
             if (blk->wasPrefetched()) {
                 unusedPrefetches++;
             }
             // Will send up Writeback/CleanEvict snoops via isCachedAbove
             // when pushing this writeback list into the write buffer.
-            if (blk->isDirty() || writebackClean) {
+            if(blk->blkCnt == 1 ){ 
+				if (blk->isDirty() || writebackClean) {
                 // Save writeback packet for handling by caller
-                writebacks.push_back(writebackBlk(blk));
-            } else {
-                writebacks.push_back(cleanEvictBlk(blk));
-            }
+					writebacks.push_back(writebackBlk(blk));
+				} else {
+					writebacks.push_back(cleanEvictBlk(blk));
+				}
+			}else if(blk->blkCnt > 1){        //writebacks of compressed block
+				CacheBlk * eb = blk->cBlks[0];
+				for(int i = blk->blkCnt - 1; i >= 0 ; i-- ){
+					eb = blk->cBlks[i];
+					Addr repl_addr = tags->regenerateBlkAddr(eb->tag, eb->set); // may need change it Qi
+					MSHR *repl_mshr = mshrQueue.findMatch(repl_addr, eb->isSecure());
+					if (repl_mshr) {
+					// must be an outstanding upgrade request
+					// on a block we're about to replace...
+						assert(!eb->isWritable() || eb->isDirty());
+						assert(repl_mshr->needsWritable());
+					// too hard to replace block with transient state
+					// allocation failed, block not inserted
+						return nullptr;
+				    }
+				    if(!eb || !eb->isValid() ) return nullptr;
+					if (eb->isDirty() || writebackClean) {
+                // Save writeback packet for handling by caller
+						writebacks.push_back(writebackBlk(eb));
+					} else {
+						writebacks.push_back(cleanEvictBlk(eb)); //real compressed
+					}
+				}
+				
+			}
         }
     }
 

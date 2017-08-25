@@ -52,7 +52,8 @@ class BaseCache(MemObject):
 
     size = Param.MemorySize("Capacity")
     assoc = Param.Unsigned("Associativity")
-
+    sector_size = Param.Int(1, "#blocks size in a sector")
+    entry_size = Param.Int(64, "entry size in a block")
     hit_latency = Param.Cycles("Hit latency")
     write_latency = Param.Cycles("The Write lantecy for this cache")
     response_latency = Param.Cycles("Latency for the return path on a miss");

@@ -60,6 +60,8 @@
 #include "mem/cache/tags/base.hh"
 #include "params/Cache.hh"
 #include "sim/eventq.hh"
+#include "mem/cache/tags/base_set_assoc.hh"
+
 
 //Forward decleration
 class BasePrefetcher;
@@ -69,6 +71,7 @@ class BasePrefetcher;
  * supplying different template policies. TagStore handles all tag and data
  * storage @sa TagStore, \ref gem5MemorySystem "gem5 Memory System"
  */
+
 class Cache : public BaseCache
 {
   public:
@@ -201,7 +204,8 @@ class Cache : public BaseCache
      * This cache should allocate a block on a line-sized write miss.
      */
     const bool doFastWrites;
-
+    
+    int entrySize;
     /**
      * Turn line-sized writes into WriteInvalidate transactions.
      */
@@ -278,6 +282,8 @@ class Cache : public BaseCache
      * @param writebacks List for any writebacks that need to be performed.
      * @return Boolean indicating whether the request was satisfied.
      */
+    //static bool checkcompressbility(CacheBlk * b, Addr addr, PacketPtr pkt, int entSize);
+    
     bool access(PacketPtr pkt, CacheBlk *&blk,
                 Cycles &lat, PacketList &writebacks);
 

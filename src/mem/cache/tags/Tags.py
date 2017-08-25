@@ -48,6 +48,8 @@ class BaseTags(ClockedObject):
 
     # Get the block size from the parent (system)
     block_size = Param.Int(Parent.cache_line_size, "block size in bytes")
+    sector_size = Param.Int(Parent.sector_size, "#blocks size in a sector")
+    entry_size = Param.Int(Parent.entry_size, "entry size in a block")
 
     # Get the hit latency from the parent (cache)
     hit_latency = Param.Cycles(Parent.hit_latency,
@@ -81,6 +83,18 @@ class MLC(BaseSetAssoc):
     type = 'MLC'
     cxx_class = 'MLC'
     cxx_header = "mem/cache/tags/mlc.hh"
+    #shifSize = Param.Int(Parent.shift_size, "shift size in bytes")
+    flipSize = Param.Int(4, "flip size in bytes")
+    encodingSize = Param.Int(4, "encoding size in bytes")
+    loc_weight = Param.Int(0, "location weight")
+    diverse_weight = Param.Float(5.8, "diverse weight")
+    thres = Param.Int(12, "encoding threshold out of 64 ")
+    options = Param.Int(0, "replace scheme")
+
+class SEC(BaseSetAssoc):
+    type = 'SEC'
+    cxx_class = 'SEC'
+    cxx_header = "mem/cache/tags/sec.hh"
     #shifSize = Param.Int(Parent.shift_size, "shift size in bytes")
     flipSize = Param.Int(4, "flip size in bytes")
     encodingSize = Param.Int(4, "encoding size in bytes")

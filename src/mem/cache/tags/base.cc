@@ -119,8 +119,70 @@ BaseTags::regStats()
         occupancies.subname(i, cache->system->getMasterName(i));
     }
     //add by qi 
-    
-		
+    blkInSec
+		.init(20)
+		.name(name() + ".blk_in_sector")
+        .desc("num of blocks in a sector")
+        .flags(nozero | nonan);
+        
+	entInSec
+		.init(18)
+		.name(name() + ".totalEntries")
+        .desc("num of dict_entries needed in a sector")
+        .flags(nozero | nonan);
+        
+    TotalEntries
+		.init(10)
+		.name(name() + ".num_entries")
+        .desc("entries number distribution")
+        .flags(total| nonan);
+        
+	compressCnt
+		.init(8)
+		.name(name() + ".compress_cnt")
+        .desc("compressible inside a set")
+        .flags(total | nonan);
+	nearbyCompressCnt
+		.init(8)
+		.name(name() + ".nearby_compress_cnt")
+        .desc("compressible inside a set")
+        .flags(total | nonan);
+   //replacement     
+     blkInSec2
+		.init(20)
+		.name(name() + ".blk_in_sector2")
+        .desc("num of blocks in a sector")
+        .flags(nozero | nonan);
+        
+	entInSec2
+		.init(18)
+		.name(name() + ".totalEntries2")
+        .desc("num of dict_entries needed in a sector")
+        .flags(nozero | nonan);
+        
+    TotalEntries2
+		.init(10)
+		.name(name() + ".num_entries2")
+        .desc("entries number distribution")
+        .flags(total| nonan);
+    evictionCnt
+		.init(8)
+		.name(name() + ".compress_eviction")
+        .desc("compressed blocks evicted")
+        .flags(total | nonan);    
+	compressCnt2
+		.init(8)
+		.name(name() + ".compress_cnt2")
+        .desc("compressible inside a set")
+        .flags(total | nonan);
+	nearbyCompressCnt2
+		.init(8)
+		.name(name() + ".nearby_compress_cnt2")
+        .desc("compressible inside a set")
+        .flags(total | nonan);
+        
+        //replacement
+
 	avgFlipbits
 		.init(9)
 		.name(name() + ".avg_fb")

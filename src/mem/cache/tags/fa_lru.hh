@@ -176,6 +176,7 @@ public:
      */
     void invalidate(CacheBlk *blk) override;
 
+    bool checkcompressbility(CacheBlk * b, Addr addr, PacketPtr pkt, int ent) override { return false; }
     /**
      * Access block and update replacement data.  May not succeed, in which
      * case nullptr pointer is returned.  This has all the implications of a

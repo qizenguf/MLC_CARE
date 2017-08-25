@@ -49,11 +49,11 @@
 #define __MEM_CACHE_BLK_HH__
 
 #include <list>
-
+#include <vector>
 #include "base/printable.hh"
 #include "mem/packet.hh"
 #include "mem/request.hh"
-
+#include <unordered_map>
 /**
  * Cache block status bit assignments
  */
@@ -86,6 +86,9 @@ class CacheBlk
     int asid;
     /** Data block tag value. */
     Addr tag;
+    Addr tag2;
+    std::vector<Addr> tags;
+    int secid;
     /**
      * Contains a copy of the data in this block for easy access. This is used
      * for efficient execution when the data could be actually stored in
@@ -96,11 +99,18 @@ class CacheBlk
     uint8_t *data;
     /** the number of bytes stored in this block. */
     unsigned size;
-
+	
     // Rakesh - Additional blk for two step;
-    uint8_t *data2;
+    std::vector<CacheBlk *> cBlks;
     unsigned size2;
-
+    uint8_t *data2;
+	//Qi - additional structure for compression
+	int blkCnt;
+	int curScheme; // 0 for notdecided, 1 for full, 2 for partial
+	std::unordered_map<uint64_t, int> dictionary;
+	std::unordered_map<uint64_t, int> dictionary2; // for 28-bit entry
+	//vector<vector<int>>  pointers;
+	//vector<uint8_t *> extraBlks;
 
     /** block state: OR of CacheBlkStatusBit */
     typedef unsigned State;
@@ -174,15 +184,22 @@ class CacheBlk
 
     CacheBlk()
         : task_id(ContextSwitchTaskId::Unknown),
-          asid(-1), tag(0), data(0) ,size(0), status(0), encodingBits(0), whenReady(0),
+          asid(-1), tag(0), tag2(0), data(0) ,size(0), blkCnt(1), curScheme(0), status(0), encodingBits(0), whenReady(0),
           set(-1), way(-1), isTouched(false), refCount(0),
           srcMasterId(Request::invldMasterId),
           tickInserted(0)
-    {}
+    {
+		}
 
     CacheBlk(const CacheBlk&) = delete;
     CacheBlk& operator=(const CacheBlk&) = delete;
-
+	~CacheBlk(){
+		for(int i =0 ;i< blkCnt; i++){
+			delete cBlks[i]->data;
+			delete cBlks[i];
+		}
+		
+	}
     /**
      * Checks the write permissions of this block.
      * @return True if the block is writable.

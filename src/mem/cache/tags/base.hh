@@ -67,7 +67,10 @@ class BaseTags : public ClockedObject
   protected:
     /** The block size of the cache. */
     const unsigned blkSize;
+    
+
     /** The size of the cache. */
+    
     const unsigned size;
     /** The access latency of the cache. */
     const Cycles accessLatency;
@@ -108,8 +111,23 @@ class BaseTags : public ClockedObject
 	Stats::Vector totalRanks;
 	Stats::Scalar totalInvalidFill;
     Stats::AverageVector avgFlipbits;
-
+    
+	Stats::Vector blkInSec;
+	Stats::Vector entInSec;
+	Stats::Vector TotalEntries;
+	Stats::Vector compressCnt;
+	Stats::Vector nearbyCompressCnt;
+	//replacement
+	Stats::Vector blkInSec2;
+	Stats::Vector entInSec2;
+	Stats::Vector TotalEntries2;
+	Stats::Vector evictionCnt;
+	Stats::Vector compressCnt2;
+	Stats::Vector nearbyCompressCnt2;
+	
+	
     Stats::Vector totalFlipbits;
+	
     /** total Number of 4 trans*/
     Stats::Vector lruTrans;
     /** total Number of 4 trans*/
@@ -210,7 +228,7 @@ class BaseTags : public ClockedObject
     {
         return (addr & (Addr)(blkSize-1));
     }
-
+	virtual bool checkcompressbility(CacheBlk * b, Addr addr, PacketPtr pkt, int ent) = 0;
     /**
      * Find the cache block given set and way
      * @param set The set of the block.

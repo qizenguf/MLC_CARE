@@ -82,7 +82,7 @@ class BaseSetAssoc : public BaseTags
     typedef std::list<BlkType*> BlkList;
     /** Typedef the set type used in this tag store. */
     typedef CacheSet<CacheBlk> SetType;
-
+	typedef unsigned char Byte;
 
   protected:
     /** The associativity of the cache. */
@@ -90,6 +90,11 @@ class BaseSetAssoc : public BaseTags
     /** The allocatable associativity of the cache (alloc mask). */
     unsigned allocAssoc;
     /** The number of sets in the cache. */
+        /** The sector size of the cache. */
+    const unsigned secSize;
+    
+    const unsigned entrySize;
+    
     const unsigned numSets;
     /** Whether tags and data are accessed sequentially. */
     const bool sequentialAccess;
@@ -108,15 +113,20 @@ class BaseSetAssoc : public BaseTags
 
     //Rakesh - additional data block for two state
     uint8_t *dataBlks2;
-
+	uint8_t *extraBlks;
     /** The amount to shift the address to get the set. */
     int setShift;
+    /** The amount to shift the address to get the sec#. */
+    int secShift;
     /** The amount to shift the address to get the tag. */
     int tagShift;
     /** Mask out all bits that aren't part of the set index. */
     unsigned setMask;
+     /** Mask out all bits that aren't part of the sector index. */
+    unsigned secMask;
     /** Mask out all bits that aren't part of the block offset. */
     unsigned blkMask;
+    unsigned numEntry;
 
 public:
 
@@ -215,7 +225,7 @@ public:
         Addr tag = extractTag(addr);
         int set = extractSet(addr);
         BlkType *blk = sets[set].findBlk(tag, is_secure);
-        lat = accessLatency;;
+        lat = accessLatency;
 
         // Access all tags in parallel, hence one in each way.  The data side
         // either accesses all blocks in parallel, or one block sequentially on
@@ -282,12 +292,15 @@ public:
         return blk;
     }
 
-
+	 
+	 
+	 
     /**
      * Insert the new block into the cache.
      * @param pkt Packet holding the address to update
      * @param blk The block to update.
      */
+    
      void insertBlock(PacketPtr pkt, CacheBlk *blk) override
      {
          Addr addr = pkt->getAddr();
@@ -324,7 +337,7 @@ public:
 
          // Set tag for new block.  Caller is responsible for setting status.
          blk->tag = extractTag(addr);
-
+		// blk->dictionary.clear(); // added by Qi
          // deal with what we are bringing in
          assert(master_id < cache->system->maxMasters());
          occupancies[master_id]++;
@@ -363,7 +376,8 @@ public:
      */
     Addr extractTag(Addr addr) const override
     {
-        return (addr >> tagShift);
+        return (addr >> setShift);
+      //  return (addr >> (setShift + secShift)); // modified by Qi
     }
 
     /**
@@ -373,8 +387,80 @@ public:
      */
     int extractSet(Addr addr) const override
     {
-        return ((addr >> setShift) & setMask);
+        return ((addr >> (setShift + secShift)) & setMask);
     }
+    /**
+     * Calculate the sector index from the address. by qi
+     * @param addr The address to get the set from.
+     * @return The sector index of the address.
+     */
+    int extractSectorID(Addr addr)
+    {
+        return ((addr >> (setShift)) & secMask);
+    }
+    /**
+     * extract the dictionary from a block.
+     * @param block content and size of dictionary entry.( 8byte at most)
+     * @return dictionary entries vector.
+     */
+    /*unordered_map<uint64_t , int> extractDict(const Byte* ablock, int size, int entrySize){
+		unordered_map<uint64_t, int> ret;
+		int numEnt = size/entrySize;
+		for(int i = 0; i<numEnt; i++){
+			uint64_t cur = 0;
+			for(int j = 0; k<entrySize; k++) 
+				cur = cur<<8 + abblok[ i*entrySize + j];
+			if( ret.find(cur) == NULL)
+				ret[cur] = 1<<i;
+			else
+				ret[cur] |= 1<<i;
+			}
+		return ret;		
+	}*/
+	static std::vector<int> extractDict(const Byte* ablock, unordered_map<uint64_t , int> &oldMap, int size, int entrySize, int offsetSize = 0){
+		//unordered_map<uint64_t, int> ret;
+		vector<int> ret;
+		int numEnt = size/entrySize;
+		//if(size == 65) cout<<"nearby"<<endl;
+		//else cout <<"random"<<endl;
+		for(int i = 0; i<numEnt; i++){
+			uint64_t cur = 0;
+			for(int j = 0; j<entrySize; j++) 
+				cur = ((cur<<8) | ablock[ i*entrySize + j]);
+			cur = cur >> offsetSize; // offset of each entry
+			if( oldMap.find(cur) == oldMap.end()){
+				//cout<<(uint64_t)ablock[0]<< std::hex<<"  data "<<cur<< "  dic_size " << oldMap.size() << "  offset " << offsetSize <<endl;
+				ret.push_back(oldMap.size());
+				oldMap[cur] = oldMap.size();
+				//ret.push_back(oldMap.size());
+			}else{
+				//cout<<(uint64_t)ablock[0]<< std::hex<<"  data "<<cur<< "  dic_size " << oldMap.size() << "  offset " << offsetSize <<" found"<<endl;
+				ret.push_back(oldMap[cur]);
+			}
+		}
+		return ret;		
+	}
+    bool checkcompressbility(CacheBlk * b, Addr addr, PacketPtr pkt, int entSize) override
+     {
+        bool ifCompress = false;
+        unordered_map<uint64_t, int> temp(b->dictionary); // protect the dictionary from block and make a copy
+        extractDict(pkt->getConstPtr<uint8_t>(), temp, 65, entSize, 0);
+        if(b->curScheme != 2 && temp.size() <= 8 ) {                
+            b->dictionary = temp;       
+            b->curScheme = 1;       
+            ifCompress = true;
+        }
+        unordered_map<uint64_t, int> temp2(b->dictionary2);
+        extractDict(pkt->getConstPtr<uint8_t>(), temp2, 65, entSize, 4);
+        if(b->curScheme != 1 && temp.size() <= 4 ) {
+
+            b->dictionary2 = temp2;
+            b->curScheme = 2;
+            ifCompress = true;
+        }
+        return ifCompress;
+        
+     }
 
     /**
      * Align an address to the block size.
@@ -394,7 +480,8 @@ public:
      */
     Addr regenerateBlkAddr(Addr tag, unsigned set) const override
     {
-        return ((tag << tagShift) | ((Addr)set << setShift));
+        //return ((tag << tagShift) | ((Addr)set << setShift));
+        return (tag << setShift); // by Qi
     }
 
     /**

@@ -55,7 +55,7 @@
 using namespace std;
 
 BaseSetAssoc::BaseSetAssoc(const Params *p)
-    :BaseTags(p), assoc(p->assoc), allocAssoc(p->assoc),
+    :BaseTags(p), assoc(p->assoc), allocAssoc(p->assoc), secSize(p->sector_size), entrySize(p->entry_size),
      numSets(p->size / (p->block_size * p->assoc)),
      sequentialAccess(p->sequential_access)
 {
@@ -69,19 +69,23 @@ BaseSetAssoc::BaseSetAssoc(const Params *p)
     if (assoc <= 0) {
         fatal("associativity must be greater than zero");
     }
-
+	numEntry = blkSize/entrySize;
     writeSize = blkSize;
     // If two step encoding is employed we need to build decision table
     if(twostep > 0)
-		writeSize = 96; // Two step needs 50% extra space
+		writeSize = blkSize*1.5; // Two step needs 50% extra space
 
     blkMask = blkSize - 1;
+    //modify here for sector
+    
     setShift = floorLog2(blkSize);
+    secShift = floorLog2(secSize); // add by Qi
     setMask = numSets - 1;
+    secMask = secSize - 1;
     tagShift = setShift + floorLog2(numSets);
     /** @todo Make warmup percentage a parameter. */
     warmupBound = numSets * assoc;
-
+	
     sets = new SetType[numSets];
     blks = new BlkType[numSets * assoc];
     // allocate data storage in one big chunk
@@ -91,7 +95,7 @@ BaseSetAssoc::BaseSetAssoc(const Params *p)
         dataBlks2 = new uint8_t[numBlocks * writeSize]; //Rakesh - Allocate for two step writes with encoding
     else
         dataBlks2 = NULL;
-
+    //extraBlks = new uint8_t[secSize * numBlocks * blkSize];
 	range = 4; // modified by Qi
     unsigned blkIndex = 0;       // index into blks array
     for (unsigned i = 0; i < numSets; ++i) {
@@ -105,8 +109,13 @@ BaseSetAssoc::BaseSetAssoc(const Params *p)
             // locate next cache block
             BlkType *blk = &blks[blkIndex];
             blk->data = &dataBlks[blkSize*blkIndex];
+            /*for(int t = 0; t<secSize; t++ ){
+				blk->extraBlks.push_back(&dataBlks[blkSize*(blkIndex*secSize+t)]);
+				blk->pointers.push_back(vector<int>(numEntry, -1));
+			}*/
+			blk->blkCnt = 1;
             std::memset(blk->data, 0, blkSize);
-
+			//std::memset(blk->extraBlks[0], 0, blkSize*secSize); // make all sector to 0
             if(twostep > 0) {
                 blk->data2 = &dataBlks2[writeSize*blkIndex]; //Rakesh - point correctly in mem for encoding
                 std::memset(blk->data2, 0, writeSize);

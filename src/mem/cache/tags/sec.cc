@@ -1,0 +1,1745 @@
+/*
+ * Copyright (c) 2012-2013 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
+ * Copyright (c) 2003-2005,2014 The Regents of The University of Michigan
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met: redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer;
+ * redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution;
+ * neither the name of the copyright holders nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Authors: Erik Hallnor
+ */
+
+/**
+ * @file
+ * Definitions of a sec tag store.
+ */
+
+#include "mem/cache/tags/sec.hh"
+#include <queue>
+#include "debug/CacheRepl.hh"
+#include "mem/cache/base.hh"
+
+SEC::SEC(const Params *p)
+    : BaseSetAssoc(p)
+{
+	encodingSize = p->encodingSize;
+	//shiftSize = p->shiftSize;
+	flipSize = p->flipSize;
+	thres = p->thres;
+	loc_weight = p->loc_weight;
+	diverse_weight = p->diverse_weight;
+	shiftSize = 64;
+	options = p->options;
+	/*encodingSize = 8;
+	shiftSize = 64;
+	flipSize = 8;
+	thres = 47;
+	loc_weight = 8;*/
+	std::cout<<"sec "<< diverse_weight<<" "<<loc_weight<<" thres"<< thres<<" "<< encodingSize <<" " <<flipSize <<" options " <<options <<std::endl;
+	std::cout<<"sector "<< secSize <<" entry_size= "<<entrySize<<"  shift " <<secShift<<std::endl;
+}
+
+CacheBlk*
+SEC::accessBlock(Addr addr, bool is_secure, Cycles &lat, int master_id)
+{	
+	std::cout<< "cnt "<<addr <<endl;
+    CacheBlk *blk = BaseSetAssoc::accessBlock(addr, is_secure, lat, master_id);
+    std::cout<< "cnt2 " <<endl;
+		
+    if (blk != nullptr) {
+		//std::cout<< "cnt3 " <<endl;
+		//CacheBlk *rblk = blk;
+		std::cout<< "cnt4 " <<endl;
+        // move this block to head of the MRU list
+        sets[blk->set].moveToHead(blk);
+        std::cout<< "cnt5 " <<endl;
+        DPRINTF(CacheRepl, "set %x: moving blk %x (%s) to MRU\n",
+                blk->set, regenerateBlkAddr(blk->tag, blk->set),
+                is_secure ? "s" : "ns");
+		std::cout<< "cnt " << blk->blkCnt << "tag " << blk->tags.size() << " blks" <<  blk->cBlks.size()<<endl;
+		if( blk->blkCnt >1){
+			Addr tag = extractTag(addr);
+			for(int i = 1; i < blk->blkCnt; i++){
+				if(blk->tags[i] == tag){
+					blk = blk->cBlks[i];
+					break;
+				}
+			}
+		}
+		return blk;
+	}else{
+		std::cout<< "return cnt2 " <<endl;
+		return blk;
+	}
+}
+
+std::vector<int> 
+SEC::lineCompare( const Byte* ablock, const Byte* bblock, int size, int shiftSize, int flipSize, int flipBits){
+		int mask = 1;
+	int fs = flipSize;
+	if( flipSize == 0 ) fs = size+1; // no flip
+	else
+		mask = 1<<( (size/fs) -1 );
+	std::unordered_map<int, int> normal_cnt;
+	std::unordered_map<int, int> rev_cnt;
+	std::vector<int> ret(5, 512);
+	ret[4] = 0;
+	//int minimal_bits = 512;
+	//for (int i =0; i<size; i += shiftSize){
+		Byte from, to;
+		std::vector<int> res(5,0);// ZT, ST, HT, TT
+		//int total_bits = 0;
+		//int flipbits = 0;
+		bool ifFlip = flipBits & mask;
+		int cnt01 = 0;
+		int cnt10 = 0;
+		for(int j = 0; j < size; j++){
+			from = ablock[j]; // from block
+			if(ifFlip) from = ~from; 
+			to = bblock[j]; // to block
+			
+			
+			for(int k = 0; k<8; k += 2)  {
+				int label = (((from >> k) & 3)*10) + ((to >> k) & 3); // 3 for 0b11
+				int rev_label = (((from >> k) & 3)*10) + 3 - ((to >> k) & 3);
+				if(label  == 30 or label == 3 or label == 12 or label == 21) cnt10 += 2; // significant bits change from 1 to 0
+				else if(label == 31 or label == 13 or label == 20 or label == 2 or label == 1 or label == 10 or label == 32 or label == 23 ) cnt01 ++; // significant bits change from 0 to 1
+				//std::cout<<"label "<< label << " rev " << rev_label<<std::endl;
+				normal_cnt[label] += 1;
+				rev_cnt[rev_label] += 1;// 3 is the mask 0x11. count every 2 bits in a byte
+				 
+			}
+			
+			if(fs <= size && (j+1)% fs == 0 ){ // to decide if flip
+				if(cnt01 + cnt10 <= fs*4){ // no flip this time
+				
+					res[4] = res[4]<<1 ;
+					//bool ifSwap = false;
+					/*if( normal_cnt[1] + normal_cnt[11] + normal_cnt[22] + normal_cnt[32] < normal_cnt[2] + normal_cnt[12] +normal_cnt[21] +normal_cnt[31]){
+						//ifSwap = true;
+						std::swap(normal_cnt[1], normal_cnt[2]);
+						std::swap(normal_cnt[11], normal_cnt[12]);
+						std::swap(normal_cnt[21], normal_cnt[22]);
+						std::swap(normal_cnt[31], normal_cnt[32]);
+					}*/
+					for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second; //tt
+					}
+				}else{
+					res[4] = (res[4]<<1) + 1;
+					/*if( rev_cnt[1] + rev_cnt[11] + rev_cnt[22] + rev_cnt[32] < rev_cnt[2] + rev_cnt[12] + rev_cnt[21] + rev_cnt[31]){
+						//ifSwap = true;
+						std::swap(rev_cnt[1], rev_cnt[2]);
+						std::swap(rev_cnt[11], rev_cnt[12]);
+						std::swap(rev_cnt[21], rev_cnt[22]);
+						std::swap(rev_cnt[31], rev_cnt[32]);
+					}*/
+					for(auto it : rev_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+					}
+				}
+				mask = mask >> 1;
+				ifFlip = flipBits & mask;
+				normal_cnt.clear();
+				rev_cnt.clear();
+				cnt01 = 0;
+				cnt10 = 0;					
+			}		
+		}
+		if( fs > size){// no filp at all
+				for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+						}
+						res[4] = 0;
+		}
+		
+		//if(res[3] + res[2] < ret[3] + ret[2])
+		ret = res;
+	//}
+	assert(ret[3] + ret[2] + ret[0] + ret[1] == 256);
+	return ret;
+}
+int SEC::encodingCompare_2bit(const Byte* ablock, const Byte* bblock, int size, int shiftSize, int flipSize, int thres, int encodingSize, int zeroWeight){
+	if(flipSize == 0 ) flipSize = size+1;
+	int minimal_diff = 2000000;
+	//for (int i =0; i<size; i += shiftSize) {
+		//Byte temp;
+	int numSeg = (size/encodingSize) + 1;
+	double total_diff = 0;
+		int abits = 0, bbits = 0;
+	if(thres >= 0){	// count the #01 and 00	
+		for(int j = 0; j<size; j++){
+				for(int k = 1; k<8; k += 2)  {
+					if (ablock[j] & (1<<k) ) abits++; // count every 2nd bit in a byte
+					if (bblock[j] & (1<<k) ) bbits++;
+				}
+				if( (j+1)%encodingSize == 0 ) {
+					if(abits > thres or abits < (encodingSize*4 - thres) ) abits = 1; // 1 for domination
+					else abits = 0;
+					if(bbits > thres or bbits < (encodingSize*4 - thres) ) bbits = 1;
+					else bbits = 0;
+					if(abits != bbits) total_diff += numSeg;
+					else if( abits == 0) total_diff += 1;
+					abits = 0;
+					bbits = 0;
+				}					
+		}
+		//total_bits += flipbits;  // if no flip..
+		if(total_diff < minimal_diff) minimal_diff = total_diff;
+	}else{ // count the #11 and 00
+		int thr = - thres; // negative the thres
+		for(int j = 0; j<size; j++){
+				for(int k = 1; k<8; k += 2)  {
+					if ( (ablock[j] & (1<<k)) == (ablock[j] & (1<<(k-1)))) abits++; // count every 2nd bit in a byte
+					if ( (bblock[j] & (1<<k)) == (bblock[j] & (1<<(k-1)))) bbits++;
+				}
+				if( (j+1)%encodingSize == 0 ) {
+					if(abits > thr ) abits = 1; // 1 for same dominate
+					else abits = 0;
+					if(bbits > thr ) bbits = 1;
+					else bbits = 0;
+					if(abits != bbits) total_diff += numSeg;
+					else if( abits == 0 ) total_diff += 1;
+					abits = 0;
+					bbits = 0;
+				}					
+		}
+		//total_bits += flipbits;  // if no flip..
+		if(total_diff < minimal_diff) minimal_diff = total_diff;
+	}		
+	//}
+	//assert(minimal_diff <= size/encodingSize);
+	return minimal_diff;	
+}
+
+std::vector<int> SEC::lineCompare_2bit_mapping( const Byte* ablock, const Byte* bblock, int size, int shiftSize, int flipSize, int flipBits){
+	int mask = 0;
+	int fs = flipSize;
+	if( flipSize == 0 ) fs = size+1; // no flip
+	else
+		mask = 2*(size/fs) - 2;
+	std::unordered_map<int, int> normal_cnt;
+	//std::unordered_map<int, int> rev_cnt;
+	std::vector<int> ret(5, 512);
+	//int mask1=0x
+	ret[4] = 0;
+	//int minimal_bits = 512;
+	//for (int i =0; i<size; i += shiftSize){
+		Byte from, to;
+		std::vector<int> res(5,0);// ZT, ST, HT, TT
+		//int total_bits = 0;
+		//int flipbits = 0;
+		int ifFlip = (flipBits >>mask) &3;
+		//int cnt01 = 0;
+		//int cnt10 = 0;
+		for(int j = 0; j < size; j++){
+			from = ablock[j]; // from block
+			if(ifFlip == 3 ) from = ~from; 
+			to = bblock[j]; // to block
+			
+			
+			for(int k = 0; k<8; k += 2)  {
+				int label_fr = (((from >> k) & 3));
+				int label_to =  ((to >> k) & 3); // 3 for 0b11
+				
+				if(ifFlip == 1 && (label_fr == 0 or label_fr == 3) ) // 00 11 swap
+					label_fr = 3 - label_fr;
+				else if(ifFlip == 2 && (label_fr == 1 or label_fr == 2) ) //01 10 swap
+					label_fr = 3- label_fr;
+				int label = label_fr *10 + label_to;
+				//int rev_label = (((from >> k) & 3)*10) + 3 - ((to >> k) & 3);
+				//if(label  == 30 or label == 31 or label == 20 or label == 21) cnt10++; // significant bits change from 1 to 0
+				//else if(label == 3 or label == 13 or label == 2 or label == 12 ) cnt01 ++; // significant bits change from 0 to 1
+				//std::cout<<"label "<< label << " rev " << rev_label<<std::endl;
+				normal_cnt[label] += 1;
+				//rev_cnt[rev_label] += 1;// 3 is the mask 0x11. count every 2 bits in a byte
+				 
+			}
+			
+			if(fs <= size && (j+1)% fs == 0 ){ // to decide if flip
+				if( normal_cnt[0] + normal_cnt[10] + normal_cnt[23] + normal_cnt[33] >= normal_cnt[3] + normal_cnt[13] +normal_cnt[20] +normal_cnt[30]){ // no flip
+				
+					res[4] = res[4]<<1 ;
+					//bool ifSwap = false;
+					res[4] = res[4]<<1 ;
+					if( normal_cnt[1] + normal_cnt[11] + normal_cnt[22] + normal_cnt[32] < normal_cnt[2] + normal_cnt[12] +normal_cnt[21] +normal_cnt[31]){
+						//ifSwap = true;
+						res[4] += 1;
+						std::swap(normal_cnt[1], normal_cnt[2]);
+						std::swap(normal_cnt[11], normal_cnt[12]);
+						std::swap(normal_cnt[21], normal_cnt[22]);
+						std::swap(normal_cnt[31], normal_cnt[32]);
+					}
+					for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second; //tt
+					}
+				}else{
+					res[4] = (res[4]<<1) or 1;
+					std::swap(normal_cnt[0], normal_cnt[3]);
+					std::swap(normal_cnt[10], normal_cnt[13]);
+					std::swap(normal_cnt[23], normal_cnt[20]);
+					std::swap(normal_cnt[33], normal_cnt[30]);
+					res[4] = (res[4]<<1);
+					if( normal_cnt[1] + normal_cnt[11] + normal_cnt[22] + normal_cnt[32] < normal_cnt[2] + normal_cnt[12] + normal_cnt[21] + normal_cnt[31]){
+						//ifSwap = true;
+						res[4] += 1;
+						std::swap(normal_cnt[1], normal_cnt[2]);
+						std::swap(normal_cnt[11], normal_cnt[12]);
+						std::swap(normal_cnt[21], normal_cnt[22]);
+						std::swap(normal_cnt[31], normal_cnt[32]);
+					}
+					for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+					}
+				}
+				mask = mask -2;
+				ifFlip = (flipBits >> mask) & 3;
+				normal_cnt.clear();
+				//rev_cnt.clear();
+				//cnt01 = 0;
+				//cnt10 = 0;					
+			}		
+		}
+		if( fs > size){// no filp at all
+				for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+						}
+						res[4] = 0;
+		}
+		
+		//if(res[3] + res[2] < ret[3] + ret[2])
+		ret = res;
+	//}
+	assert(ret[3] + ret[2] + ret[0] + ret[1] == 256);
+	return ret;	
+}
+
+
+std::vector<int> SEC::lineCompare_2bit( const Byte* ablock, const Byte* bblock, int size, int shiftSize, int flipSize, int flipBits){
+	int mask = 1;
+	int fs = flipSize;
+	if( flipSize == 0 ) fs = size+1; // no flip
+	else
+		mask = 1<<( (size/fs) -1 );
+	std::unordered_map<int, int> normal_cnt;
+	std::unordered_map<int, int> rev_cnt;
+	std::vector<int> ret(5, 512);
+	ret[4] = 0;
+	//int minimal_bits = 512;
+	//for (int i =0; i<size; i += shiftSize){
+		Byte from, to;
+		std::vector<int> res(5,0);// ZT, ST, HT, TT
+		//int total_bits = 0;
+		//int flipbits = 0;
+		bool ifFlip = flipBits & mask;
+		int cnt01 = 0;
+		int cnt10 = 0;
+		for(int j = 0; j < size; j++){
+			from = ablock[j]; // from block
+			if(ifFlip) from = ~from; 
+			to = bblock[j]; // to block
+			
+			
+			for(int k = 0; k<8; k += 2)  {
+				int label = (((from >> k) & 3)*10) + ((to >> k) & 3); // 3 for 0b11
+				int rev_label = (((from >> k) & 3)*10) + 3 - ((to >> k) & 3);
+				if(label  == 30 or label == 31 or label == 20 or label == 21) cnt10++; // significant bits change from 1 to 0
+				else if(label == 3 or label == 13 or label == 2 or label == 12 ) cnt01 ++; // significant bits change from 0 to 1
+				//std::cout<<"label "<< label << " rev " << rev_label<<std::endl;
+				normal_cnt[label] += 1;
+				rev_cnt[rev_label] += 1;// 3 is the mask 0x11. count every 2 bits in a byte
+				 
+			}
+			
+			if(fs <= size && (j+1)% fs == 0 ){ // to decide if flip
+				if(cnt01 + cnt10 <= fs*2){ // no flip this time
+				
+					res[4] = res[4]<<1 ;
+					//bool ifSwap = false;
+					/*if( normal_cnt[1] + normal_cnt[11] + normal_cnt[22] + normal_cnt[32] < normal_cnt[2] + normal_cnt[12] +normal_cnt[21] +normal_cnt[31]){
+						//ifSwap = true;
+						std::swap(normal_cnt[1], normal_cnt[2]);
+						std::swap(normal_cnt[11], normal_cnt[12]);
+						std::swap(normal_cnt[21], normal_cnt[22]);
+						std::swap(normal_cnt[31], normal_cnt[32]);
+					}*/
+					for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second; //tt
+					}
+				}else{
+					res[4] = (res[4]<<1) + 1;
+					/*if( rev_cnt[1] + rev_cnt[11] + rev_cnt[22] + rev_cnt[32] < rev_cnt[2] + rev_cnt[12] + rev_cnt[21] + rev_cnt[31]){
+						//ifSwap = true;
+						std::swap(rev_cnt[1], rev_cnt[2]);
+						std::swap(rev_cnt[11], rev_cnt[12]);
+						std::swap(rev_cnt[21], rev_cnt[22]);
+						std::swap(rev_cnt[31], rev_cnt[32]);
+					}*/
+					for(auto it : rev_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+					}
+				}
+				mask = mask >> 1;
+				ifFlip = flipBits & mask;
+				normal_cnt.clear();
+				rev_cnt.clear();
+				cnt01 = 0;
+				cnt10 = 0;					
+			}		
+		}
+		if( fs > size){// no filp at all
+				for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+						}
+						res[4] = 0;
+		}
+		
+		//if(res[3] + res[2] < ret[3] + ret[2])
+		ret = res;
+	//}
+	assert(ret[3] + ret[2] + ret[0] + ret[1] == 256);
+	return ret;	
+}
+/*
+std::vector<int>
+SEC::lineCompare_2bit( const Byte* ablock, const Byte* bblock, int size, int shiftSize, int flipSize, int encodingBits){
+	if( flipSize == 0 ) flipSize = size+1; // no flip
+	std::unordered_map<int, int> normal_cnt;
+	std::unordered_map<int, int> rev_cnt;
+	std::vector<int> ret(5, 512);
+	//int minimal_bits = 512;
+	for (int i =0; i<size; i += shiftSize){
+		Byte from, to;
+		std::vector<int> res(5,0);// ZT, ST, HT, TT
+		//int total_bits = 0;
+		//int flipbits = 0;
+		bool ifFlip = encodingBits & 1;
+		int cnt01 = 0;
+		int cnt10 = 0;
+		for(int j = 0; j < size; j++){
+			from = ablock[j]; // from block
+			if(ifFlip) from = ~ from; 
+			to = bblock[(j+i)%size]; // to block
+			
+			
+			for(int k = 0; k<8; k += 2)  {
+				int label = (((from >> k) & 3)*10) + ((to >> k) & 3); // 3 for 0b11
+				int rev_label = (((from >> k) & 3)*10) + ~((to >> k) & 3);
+				if(label  == 30 or label == 31 or label == 20 or label == 21) cnt10++; // significant bits change from 1 to 0
+				else if(label == 3 or label == 13 or label == 2 or label == 12 ) cnt01 ++;
+				normal_cnt[label]++;
+				rev_cnt[rev_label]++;// 3 is the mask 0x11. count every 2 bits in a byte
+				 
+			}
+			if((j+1)% flipSize == 0 ){ // to decide if flip
+				if(cnt01 + cnt10 <= flipSize*2){
+					res[4] = res[4]<<1 ;
+					for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+					}
+				}else{
+					res[4] = (res[4]<<1) + 1;
+					for(auto it : rev_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+					}
+				}
+				ifFlip = encodingBits & (1 << ((j+1)/flipSize));
+				normal_cnt.clear();
+				rev_cnt.clear();
+				cnt01 = 0;
+				cnt10 = 0;					
+			}		
+		}
+		if(flipSize > size){
+				for(auto it : normal_cnt){
+						if(it.first == 0 or it.first == 33 or it.first == 22 or it.first == 11 )//zt
+							res[0] += it.second;							
+						else if(it.first == 1 or it.first == 10 or it.first == 32 or it.first == 23)//st
+							res[1] += it.second;
+						else if(it.first == 3 or it.first == 13 or it.first == 20 or it.first == 30) //ht
+							res[2] += it.second;
+						else 
+							res[3] += it.second;
+				}
+		}
+		if(res[3] + res[2] < ret[3] + ret[2])
+				ret = res;
+	}
+	assert(ret[3] + ret[2] + ret[0] + ret[1] == 256);
+	return ret;	
+}
+*/
+
+int
+SEC::encodingCompare(const Byte* ablock, const Byte* bblock, int size, int shiftSize, int flipSize, int thres, int encodingSize){
+	if(flipSize == 0 ) flipSize = size+1;
+	int minimal_diff = size/8;
+	for (int i =0; i<size; i += shiftSize) {
+		//Byte temp;
+		int total_diff = 0;
+		int abits = 0, bbits = 0;
+		for(int j = 0; j<size; j++){
+				for(int k = 0; k<8; k++)  {
+					if (ablock[j] & (1<<k) ) abits++; // count every bit in a byte
+					if (bblock[j] & (1<<k) ) bbits++;
+					}
+				if( (j+1)%encodingSize == 0 ) {
+					if(abits > thres or abits < (encodingSize*8 - thres) ) abits = 1;
+					else abits = 0;
+					if(bbits > thres or bbits < (encodingSize*8 - thres) ) bbits = 1;
+					else bbits = 0;
+					if(abits != bbits) total_diff++;
+					abits = 0;
+					bbits = 0;
+				}					
+		}
+		//total_bits += flipbits;  // if no flip..
+		if(total_diff < minimal_diff) minimal_diff = total_diff;		
+	}
+	//assert(minimal_diff <= size/encodingSize);
+	return minimal_diff;	
+}
+
+
+
+CacheBlk*
+SEC::findVictim(Addr addr, PacketPtr pkt)
+{
+    int set = extractSet(addr);
+    int tag = extractTag(addr);
+    // grab a replacement candidate
+    BlkType *blk = nullptr;
+    for (int i = assoc - 1; i >= 0; i--) { // replace the second to LRU
+        BlkType *b = sets[set].blks[i];
+        if (b->way < allocAssoc) {
+            blk = b;
+            break;
+        }
+    }
+    //
+    //
+    //
+  /*  int secCnt = 0;
+	int compressedScheme = 0;
+	int nearbyCompressedScheme = 0;
+    unordered_map<uint64_t, int> full_entries;
+	unordered_map<uint64_t, int> partial_entries;
+	BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), full_entries, 64, entrySize, 0);
+	BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), partial_entries, 64, entrySize, 4);
+	unordered_map<uint64_t, int> sector_full(full_entries); 
+	int blkCnt = 0;
+	//int compressedScheme = 0;
+    for (int idx = assoc -1 ; idx >= 0; idx--) { 
+        BlkType *b = sets[set].blks[idx];
+        if ( b->way < allocAssoc && b->isValid()) {
+			blkCnt ++;
+            if( ((b->tag) >>secShift) ==  ((tag) >>secShift)){ // we found one from the same sector			
+				//std::cout<<std::hex << b->tag << " " << blk->tag<<"|";
+				secCnt++;
+				BaseSetAssoc::extractDict(b->data, sector_full, 65, entrySize, 0);
+				//if( b->dictionary.size() > compressThres ) // no compressible
+				//	extractDict(blk, blk->dictionary, 64, entrySize, 0);
+				//else
+				unordered_map<uint64_t, int> temp(full_entries); 
+				BaseSetAssoc::extractDict(b->data, temp, 65, entrySize, 0);
+				if(temp.size() <= 8 ) nearbyCompressedScheme = 1; // 1 means compressible
+				temp = partial_entries; 
+				BaseSetAssoc::extractDict(b->data, temp, 65, entrySize, 4);
+				if(temp.size() <= 4 ) nearbyCompressedScheme = 1;	
+				
+				nearbyCompressedScheme !=0			
+			}
+			if(compressedScheme == 0 and (full_entries.size() <= 8 or partial_entries.size() <= 4 ) ){
+				unordered_map<uint64_t, int> temp(full_entries); 
+				BaseSetAssoc::extractDict(b->data, temp, 64, entrySize, 0);
+				if(temp.size() <= 8 ) compressedScheme += 1;
+				temp = partial_entries; 
+				BaseSetAssoc::extractDict(b->data, temp, 64, entrySize, 4);
+				if(temp.size() <= 4 ) compressedScheme += 2;
+				
+			}
+			if( compressedScheme !=0 || nearbyCompressedScheme !=0 )
+        }	
+	}
+    if (secCnt > secSize)
+			std::cout<< "too ,many blocks in" << secCnt << " secSize " <<secSize<< std::endl;
+    blkInSec2[secCnt] ++;
+	//sectorEntries[secCnt] += blk->dictionary.size();
+	if(sector_full.size() > 16 )
+		entInSec2[17] ++;
+    else{
+		blkInSec2[secCnt + 10] ++; //entra counting for small sector
+		TotalEntries2[secCnt] += sector_full.size();
+		entInSec2[sector_full.size()] ++;
+	}
+	if(blkCnt > 29)
+		compressCnt2[compressedScheme + 4]++;
+	else
+		compressCnt2[compressedScheme]++;
+	if(secCnt == 0)
+		nearbyCompressCnt2[0]++;
+	else
+		nearbyCompressCnt2[ nearbyCompressedScheme + 1 ]++;
+    //sets[set].moveToHead(blk);
+    //
+    
+    
+    //std::vector<int> lru_trans(5, 0);
+    //std::vector<int> opt_trans(5, 0);
+    //opt_trans = CAR::lineCompare_2bit(blk->data, pkt->getConstPtr<uint8_t>(), 64, 64, 8, sets[set].flipBits[blk->way]);
+    //lru_trans = CAR::lineCompare_2bit(blk->data, pkt->getConstPtr<uint8_t>(), 64, 64, 64, 0); // no flip
+    //for(int i = 0; i < 4 ; i++){
+		//optimalTrans[i] += opt_trans[i];
+		//lruTrans[i] += lru_trans[i];
+	//}
+		
+	//sets[set].flipBits[blk->way] = 	opt_trans[4];*/
+	int compressScheme = 0;
+	int nearbyCompressScheme = 0;
+	unordered_map<uint64_t, int> full_entries;
+	unordered_map<uint64_t, int> partial_entries;
+	BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), full_entries, 64, entrySize, 0);
+	BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), partial_entries, 64, entrySize, 4);
+	
+	for (int idx = assoc -1 ; idx >= 0; idx--) { //for nearby blocks
+        BlkType *b = sets[set].blks[idx];
+        if ( b->way < allocAssoc && b->isValid() && ((b->tag) >>secShift) ==  ((tag) >>secShift)) {
+			unordered_map<uint64_t, int> temp(b->dictionary);  //protect the dictionary from block and make a copy
+			BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), temp, 65, entrySize, 0);
+			if(b->curScheme != 2 && temp.size() <= 8 ) {
+				if(b->blkCnt == 1){
+						b->tags.push_back(b->tag); 
+						b->cBlks.push_back(b);
+					}
+				nearbyCompressScheme = 1;
+				b->dictionary = temp;
+				BlkType * nb = new BlkType;
+				nb->data = new uint8_t[64];
+				nb->cBlks.push_back(b); 
+				nb->tag = tag;
+				memcpy(nb->data, pkt->getConstPtr<uint8_t>(), 64);
+				b->cBlks.push_back(nb);
+				b->tags.push_back(tag);
+				b->blkCnt++;
+				nearbyCompressCnt[b->blkCnt%8]++;
+				b->curScheme = 1;
+				break;
+			}
+			unordered_map<uint64_t, int> temp2(b->dictionary2);
+			BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), temp2, 65, entrySize, 4);
+			if(b->curScheme != 1 && temp.size() <= 4 ) {
+				if(b->blkCnt == 1){
+						b->tags.push_back(b->tag); 
+						b->cBlks.push_back(b);
+					}
+				nearbyCompressScheme = 2;
+				
+				b->dictionary2 = temp2;				
+				BlkType * nb = new BlkType;
+				nb->data = new uint8_t[64];
+				nb->tag = tag;
+				memcpy(nb->data, pkt->getConstPtr<uint8_t>(), 64);
+				nb->cBlks.push_back(b); 
+				b->cBlks.push_back(nb);
+				b->tags.push_back(tag);
+				b->blkCnt++;
+				b->curScheme = 2;
+				nearbyCompressCnt2[b->blkCnt%8] ++;
+				break;
+			}
+			
+		}
+	}
+	if(nearbyCompressScheme == 0){
+		for (int idx = assoc -1 ; idx >= 0; idx--) { //for nearby blocks
+        
+			BlkType *b = sets[set].blks[idx];
+			if ( b->way < allocAssoc && b->isValid() && b->blkCnt < 4 ) {
+				unordered_map<uint64_t, int> temp(b->dictionary);
+				BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), temp, 65, entrySize, 0);
+				if(b->curScheme != 2 && temp.size() <= 8 ) {
+					if(b->blkCnt == 1){
+						b->tags.push_back(b->tag); 
+						b->cBlks.push_back(b);
+					}
+					compressScheme = 1;
+					b->dictionary = temp;
+					
+					BlkType * nb = new BlkType;
+					nb->data = new uint8_t[64];
+					nb->cBlks.push_back(b); 
+					nb->tag = tag;
+					memcpy(nb->data, pkt->getConstPtr<uint8_t>(), 64);
+					b->cBlks.push_back(nb);
+					b->tags.push_back(tag);
+					b->blkCnt++;
+					b->curScheme = 1;
+					compressCnt[b->blkCnt%8]++;
+					break;
+				}
+				unordered_map<uint64_t, int> temp2(b->dictionary2);
+				BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), temp2, 65, entrySize, 4);
+				if( b->curScheme != 1 && temp.size() <= 4 ) {
+					if(b->blkCnt == 1){
+						b->tags.push_back(b->tag); 
+						b->cBlks.push_back(b);
+					}
+					compressScheme = 2;
+					b->dictionary2 = temp2;
+					BlkType * nb = new BlkType;
+					nb->data = new uint8_t[64];
+					nb->tag = tag;
+					nb->cBlks.push_back(b); // back pointer to parent block
+					memcpy(nb->data, pkt->getConstPtr<uint8_t>(), 64);
+					b->cBlks.push_back(nb);
+					b->tags.push_back(tag);
+					b->blkCnt++;
+					compressCnt2[b->blkCnt%8]++;
+					b->curScheme = 2;
+					break;
+				}
+				
+			}
+			
+		}
+	}
+	
+	if(nearbyCompressScheme != 0 || compressScheme != 0){
+		DPRINTF(CacheRepl, "set %x: selecting blk %x for compression\n",
+                set, regenerateBlkAddr(blk->tag, set));
+		return nullptr; // compressed no victim.
+	}else{ // not compressible, the blk is replaced
+		assert(!blk || blk->way < allocAssoc);
+		
+		if (blk && blk->isValid()) {
+			DPRINTF(CacheRepl, "set %x: selecting blk %x for replacement\n",
+                set, regenerateBlkAddr(blk->tag, set));
+		}
+		blk->dictionary = full_entries;
+		blk->dictionary2 = partial_entries;
+		evictionCnt[blk->blkCnt %8]++;
+		return blk;
+	}
+}
+
+//CacheBlk*
+//SEC::findVictim(Addr addr, PacketPtr pkt)
+//{
+    ////int set = extractSet(addr);
+    //// grab a replacement candidate
+    ////CacheBlk *blk = BaseSetAssoc::findVictim(addr);
+    ////bool unfilled = true ;
+    
+    ////LRU framework 
+	//int set = extractSet(addr);
+    //// grab a replacement candidate
+    //BlkType *blk = nullptr;
+    ////BlkType *ret = nullptr;
+    ////int cur_min = INT_MAX;
+    ////std::vector<int> lru_trans;
+   //// std::vector<int> opt_trans;
+    //std::vector<int> fb(5,0);
+    //int numSeg =  (64 / encodingSize) + 1;
+   //// bool lru = true;
+    ////int rind = assoc - 1;
+   ///* for (int i = assoc - 1; i >= 0; i--) { // replace the second to LRU
+        //BlkType *b = sets[set].blks[i];
+        //if (b->way < allocAssoc) {
+            //blk = b;           
+			//lru_trans = lineCompare_2bit(blk->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[blk->way]);				
+			//if(lru){
+				//for(int i =0; i < 4; i++)
+						//lruTrans[i] += lru_trans[i];
+				//lru = false;
+				//if(i != assoc -1){
+					//opt_trans = lru_trans;
+					////cur_min = lru_trans[2]+lru_trans[3];
+					//rind = i;
+					//ret = blk;
+					//break;
+				//}
+					
+			//}
+			//if(lru_trans[2]+lru_trans[3] < cur_min){
+				//opt_trans = lru_trans;
+				//cur_min = lru_trans[2]+lru_trans[3];
+				//rind = i;
+				//ret = blk;
+			//}			
+        //}       
+    //}
+    //for(int i = 0; i < 4 ; i++)
+		//optimalTrans[i] += opt_trans[i];
+		
+	//sets[set].flipBits[ret->way] = 	opt_trans[4];
+    //rind = rind;
+    //assert(!ret || ret->way < allocAssoc);
+	
+    //if (ret && ret->isValid()) {
+        //DPRINTF(CacheRepl, "set %x: selecting blk %x for replacement at %d\n", set, regenerateBlkAddr(ret->tag, set), rind);
+    //}
+    //return ret;*/
+    
+    //std::vector<int> locVal(assoc, 0);
+    ////LRU ENDS
+    //int retValue = -1;
+    //int idx =  assoc - 1;
+    //for (; idx >= 0; idx--) { // replace the second to LRU
+        //BlkType *b = sets[set].blks[idx];
+        //if ( !b->isValid() && b->way < allocAssoc) {
+            //blk = b;
+            //break;
+        //}
+        //blk = b;
+    //}
+    ////idx ++;
+    //if(idx < 0 ) idx = 0;
+    
+	////sec replacement process (no invalid block to replace)
+	//if ( blk && blk->isValid()) {
+		////int retValue = -1;
+		//if(range == 8){
+			//int plru[16] = {0};
+			//plru[0] = sets[set].m_tree[0];
+			//plru[1] = sets[set].m_tree[1];
+			//plru[2] = sets[set].m_tree[16];
+			//plru[3] = sets[set].m_tree[2];
+			//plru[4] = sets[set].m_tree[9];
+			//plru[5] = sets[set].m_tree[17];
+			//plru[6] = sets[set].m_tree[24];
+			//for(int i = 7; i<15; i++){
+				//int temp = 0;
+				//int p = i;
+				//int level = 0;
+				//while( p != 0){
+					//if(p%2==0 && plru[p/2-1] ==1) temp = temp+ (1<<level);
+					//else if( p%2 == 1 && plru[p/2] == 0) temp = temp + (1<<level);
+					//level ++;
+					//p = (p-1)/2;
+				//}
+				//if(temp == 7 ) // temp higher, more lru
+					//plru[i] = 1; // LRU one, the plru value is smallest as 1.
+				//else if(temp == 6) 
+					//plru[i] = 2;
+				//else if(temp > 3)	
+					//plru[i] = 3;
+				//else 
+					//plru[i] = 4;
+				//}
+			
+				 //if ( sets[set].m_tree[3] == 0)
+				 //{
+					//if ( sets[set].m_tree[4] == 0) retValue= 0;
+					//else           retValue= 1;  // b2==1
+				 //}
+				 //else
+				 //{                            // b1==1
+					//if ( sets[set].m_tree[5] == 0) retValue = 2;
+					//else           retValue = 3;  // b3==1
+				 //}
+				 //locVal[retValue]=plru[7];                         // b0==1
+				 //if ( sets[set].m_tree[6] == 0)
+				 //{
+					//if ( sets[set].m_tree[7] == 0) retValue = 4;
+					//else           retValue = 5;  // b5==1
+				 //}
+				 //else
+				 //{                            // b4==1
+					//if ( sets[set].m_tree[8] == 0) retValue = 6;
+					//else           retValue = 7;  // b6==1
+				//}
+				//locVal[retValue] = (plru[8]);   
+			 
+				 //if ( sets[set].m_tree[10] == 0)
+				 //{
+					//if ( sets[set].m_tree[11] == 0) retValue= 8;
+					//else           retValue= 9;  // b2==1
+				 //}
+				 //else
+				 //{                            // b1==1
+					//if ( sets[set].m_tree[12] == 0) retValue = 10;
+					//else           retValue = 11;  // b3==1
+				 //}
+					//locVal[retValue] = (plru[9]);   // b0==1
+				 //if ( sets[set].m_tree[13] == 0)
+				 //{
+					//if ( sets[set].m_tree[14] == 0) retValue = 12;
+					//else           retValue = 13;  // b5==1
+				 //}
+				 //else
+				 //{                            // b4==1
+					//if ( sets[set].m_tree[15] == 0) retValue = 14;
+					//else           retValue = 15;  // b6==1
+				 //}
+				//locVal[retValue] = (plru[10]);   
+			  
+				 //if ( sets[set].m_tree[18] == 0)
+				 //{
+					//if ( sets[set].m_tree[19] == 0) retValue= 16;
+					//else            retValue= 17;  // b2==1
+				 //}
+				 //else
+				 //{                            // b1==1
+					//if ( sets[set].m_tree[20] == 0) retValue = 18;
+					//else           retValue = 19;  // b3==1
+				 //}
+				//locVal[retValue] = (plru[11]);                               // b0==1
+				 //if ( sets[set].m_tree[21] == 0)
+				 //{
+					//if ( sets[set].m_tree[22] == 0) retValue = 20;
+					//else           retValue = 21;  // b5==1
+				 //}
+				 //else
+				 //{                            // b4==1
+					//if ( sets[set].m_tree[23] == 0) retValue = 22;
+					//else           retValue = 23;  // b6==1
+				 //}
+				//locVal[retValue] = (plru[12]);    
+			 
+				 //if ( sets[set].m_tree[25] == 0)
+				 //{
+					//if ( sets[set].m_tree[26] == 0) retValue= 24;
+					//else           retValue= 25;  // b2==1
+				 //}
+				 //else
+				 //{                            // b1==1
+					//if ( sets[set].m_tree[27] == 0) retValue = 26;
+					//else           retValue = 27;  // b3==1
+				 //}
+				//locVal[retValue] = (plru[13]);    
+										   //// b0==1
+				 //if ( sets[set].m_tree[28] == 0)
+				 //{
+					//if ( sets[set].m_tree[29] == 0) retValue = 28;
+					//else           retValue = 29;  // b5==1
+				 //}
+				 //else
+				 //{                            // b4==1
+					//if ( sets[set].m_tree[30] == 0) retValue = 30;
+					//else           retValue = 31;  // b6==1
+				 //}	
+				//locVal[retValue] = (plru[14]);  
+				//} 
+				//if(range == 4){
+					//int plru[8] = {0};
+					//plru[0] = sets[set].m_tree[0];
+					//plru[1] = sets[set].m_tree[1];
+					//plru[2] = sets[set].m_tree[16];
+
+					//for(int i = 3; i<7; i++){
+						//int temp = 0;
+						//int p = i;
+						//int level = 0;
+						//while( p != 0){
+							//if(p%2==0 && plru[p/2-1] ==1) temp = temp+ (1<<level);
+							//else if( p%2 == 1 && plru[p/2] == 0) temp = temp + (1<<level);
+							//level ++;
+							//p = (p-1)/2;
+						//}
+						//if(temp == 3 ) // they are the rank of regions
+							//plru[i] = 1;
+						//else if(temp == 2) 
+							//plru[i] = 2;
+						//else if(temp ==1)	
+							//plru[i] = 2;
+						//else
+							//plru[i] = 2;
+						//}
+			
+				  
+					  //if ( sets[set].m_tree[2] == 0)
+					  //{
+						 //if ( sets[set].m_tree[3] == 0)
+						 //{
+							//if ( sets[set].m_tree[4] == 0) retValue= 0;
+							//else           retValue= 1;  // b2==1
+						 //}
+						 //else
+						 //{                            // b1==1
+							//if ( sets[set].m_tree[5] == 0) retValue = 2;
+							//else           retValue = 3;  // b3==1
+						 //}
+					  //}
+					  //else
+					  //{
+						 //if ( sets[set].m_tree[6] == 0)
+						 //{                               // b0==1
+							//if ( sets[set].m_tree[7] == 0) retValue = 4;
+							//else           retValue = 5;  // b5==1
+						 //}
+						 //else
+						 //{                            // b4==1
+							//if ( sets[set].m_tree[8] == 0) retValue = 6;
+							//else           retValue = 7;  // b6==1
+						 //}
+					  //}
+						//locVal[retValue] = (plru[3]);  
+					
+					
+					  //if ( sets[set].m_tree[9] == 0)
+					  //{
+						 //if ( sets[set].m_tree[10] == 0)
+						 //{
+							//if ( sets[set].m_tree[11] == 0) retValue= 8;
+							//else           retValue= 9;  // b2==1
+						 //}
+						 //else
+						 //{                            // b1==1
+							//if ( sets[set].m_tree[12] == 0) retValue = 10;
+							//else           retValue = 11;  // b3==1
+						 //}
+					  //}
+					  //else
+					  //{                               // b0==1
+						 //if ( sets[set].m_tree[13] == 0)
+						 //{
+							//if ( sets[set].m_tree[14] == 0) retValue = 12;
+							//else           retValue = 13;  // b5==1
+						 //}
+						 //else
+						 //{                            // b4==1
+							//if ( sets[set].m_tree[15] == 0) retValue = 14;
+							//else           retValue = 15;  // b6==1
+						 //}
+					  //}
+						//locVal[retValue] = (plru[4]);  
+					
+					  //if ( sets[set].m_tree[17] == 0)
+					  //{
+						 //if ( sets[set].m_tree[18] == 0)
+						 //{
+							//if ( sets[set].m_tree[19] == 0) retValue= 16;
+							//else            retValue= 17;  // b2==1
+						 //}
+						 //else
+						 //{                            // b1==1
+							//if ( sets[set].m_tree[20] == 0) retValue = 18;
+							//else           retValue = 19;  // b3==1
+						 //}
+					  //}
+					  //else
+					  //{                               // b0==1
+						 //if ( sets[set].m_tree[21] == 0)
+						 //{
+							//if ( sets[set].m_tree[22] == 0) retValue = 20;
+							//else           retValue = 21;  // b5==1
+						 //}
+						 //else
+						 //{                            // b4==1
+							//if ( sets[set].m_tree[23] == 0) retValue = 22;
+							//else           retValue = 23;  // b6==1
+						 //}
+					  //}
+					
+						//locVal[retValue] = (plru[5]);  
+					  //if ( sets[set].m_tree[24] == 0)
+					  //{
+						 //if ( sets[set].m_tree[25] == 0)
+						 //{
+							//if ( sets[set].m_tree[26] == 0) retValue= 24;
+							//else           retValue= 25;  // b2==1
+						 //}
+						 //else
+						 //{                            // b1==1
+							//if ( sets[set].m_tree[27] == 0) retValue = 26;
+							//else           retValue = 27;  // b3==1
+						 //}
+					  //}
+					  //else
+					  //{                               // b0==1
+						 //if ( sets[set].m_tree[28] == 0)
+						 //{
+							//if ( sets[set].m_tree[29] == 0) retValue = 28;
+							//else           retValue = 29;  // b5==1
+						 //}
+						 //else
+						 //{                            // b4==1
+							//if ( sets[set].m_tree[30] == 0) retValue = 30;
+							//else           retValue = 31;  // b6==1
+						 //}
+					  //}
+					//locVal[retValue] = (plru[6]);  					
+				//}
+				 //int min_index = 0;
+				 //int enc_d = 0;
+				 //int cur_hd = 0;
+				 //int cur_recency = 0;
+				 //double lowestDiffBits = 9999999;
+				 ////double low_en = 0;
+				//std::priority_queue<double, std::vector<double>, std::greater<double> > pq;
+				//std::vector<int> curfb(5,0);
+			//if(options == 4 ){
+				//for(UInt32 i = 0 ; i < assoc; i++)
+				//{	
+					//int recency = locVal[i];
+						//if(recency == 0) recency = 10;
+						////if( range == 0 && recency == 1) recency = 0;
+						////set->read_line(i, 0, read_buff, 64, false);
+						////std::memcpy(blk->data, pkt->getConstPtr<uint8_t>(), blkSize);
+						////enc_d = encodingCompare_2bit(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, thres, encodingSize);
+						
+						
+							//if(loc_weight >= 1024 ) //old
+								//curfb = lineCompare(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]); // old line_compare
+							//else if(loc_weight >= 512 ) // 2bit remmaping
+								//curfb = lineCompare_2bit_mapping(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+							//else // flip MSB 1 bit
+								//curfb = lineCompare_2bit(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+								////pq.push(1.084*fb[1]+ 1.084*fb[3] + 2.653*fb[2] + 2.653*fb[3]);
+							
+													
+							//double cur = 1.92*curfb[1]+ 1.92*curfb[3] + 3.192*curfb[2] + 3.192*curfb[3] + recency * (diverse_weight);
+							////if(enc_d < 7 )
+							////	cur = 0 + recency * (loc_weight % 512);
+							////int t = (8 * encodingSize) * hd  + recency * loc_weight;
+							////std::cout<< i <<" diff "<<t<<" bits "<<(uint8_t)read_buff[0]<<std::endl;
+							//if(cur < lowestDiffBits || ( cur == lowestDiffBits && recency < cur_recency)) { 
+								//fb = curfb;
+								//lowestDiffBits = cur; 
+								//min_index = i;
+								////cur_hd = enc_d;
+								//cur_recency = recency;
+							//}
+						//}
+						//totalZT[273] += fb[0];
+						//totalST[273] += fb[1];
+						//totalHT[273] += fb[2];
+						//totalTT[273] += fb[3];
+						//totalReps[273] += 1;
+						
+						//idx = min_index;
+						//blk = sets[set].blks[idx];
+						//sets[set].flipBits[idx] = fb[4];
+						//while (blk->way >= allocAssoc) {
+							//idx = (idx + 1) % assoc;
+							//blk = sets[set].blks[idx];
+						//}
+
+						//assert(idx < assoc);
+						//assert(idx >= 0);
+						//assert(blk->way < allocAssoc);	
+							
+				
+			//}
+			//else if(options == 2  or options == 3 ){
+				//for(UInt32 i = 0 ; i < assoc; i++)
+				//{	
+					//int recency = locVal[i];
+					//if(recency != 0 or options == 3 ){
+						//if(recency == 0) recency = 10;
+						////if( range == 0 && recency == 1) recency = 0;
+						////set->read_line(i, 0, read_buff, 64, false);
+						////std::memcpy(blk->data, pkt->getConstPtr<uint8_t>(), blkSize);
+						//enc_d = encodingCompare_2bit(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, thres, encodingSize);
+						
+						
+							//if(loc_weight >= 1024 ) //old
+								//curfb = lineCompare(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]); // old line_compare
+							//else if(loc_weight >= 512 ) // 2bit remmaping
+								//curfb = lineCompare_2bit_mapping(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+							//else // flip MSB 1 bit
+								//curfb = lineCompare_2bit(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+								////pq.push(1.084*fb[1]+ 1.084*fb[3] + 2.653*fb[2] + 2.653*fb[3]);
+							//totalZT[enc_d] += curfb[0];
+							//totalST[enc_d] += curfb[1];
+							//totalHT[enc_d] += curfb[2];
+							//totalTT[enc_d] += curfb[3];
+							////avgZT[enc_d] = curfb[0];
+							////avgST[enc_d] = curfb[1];
+							////avgHT[enc_d] = curfb[2];
+							////avgTT[enc_d] = curfb[3];
+							//totalReps[enc_d] += 1;
+							//double cur = 10*(enc_d/numSeg) + diverse_weight*(enc_d%numSeg) + recency * (loc_weight % 512);
+							//if(options == 4)
+								//cur = 1.92*curfb[1]+ 1.92*curfb[3] + 3.192*curfb[2] + 3.192*curfb[3] + recency * (loc_weight % 512);
+							////if(enc_d < 7 )
+							////	cur = 0 + recency * (loc_weight % 512);
+							////int t = (8 * encodingSize) * hd  + recency * loc_weight;
+							////std::cout<< i <<" diff "<<t<<" bits "<<(uint8_t)read_buff[0]<<std::endl;
+							//if(cur < lowestDiffBits || ( cur == lowestDiffBits && recency < cur_recency)) { 
+								//fb = curfb;
+								//lowestDiffBits = cur; 
+								//min_index = i;
+								//cur_hd = enc_d;
+								//cur_recency = recency;
+							//}
+						//}
+					//}
+						//idx = min_index;
+						//blk = sets[set].blks[idx];
+						//sets[set].flipBits[idx] = fb[4];
+						//while (blk->way >= allocAssoc) {
+							//idx = (idx + 1) % assoc;
+							//blk = sets[set].blks[idx];
+						//}
+
+						//assert(idx < assoc);
+						//assert(idx >= 0);
+						//assert(blk->way < allocAssoc);	
+							
+				
+			//}	
+			//else if(options == 0 or options == 1 ){ // options 1 for rank options 0 for normal
+				//for(UInt32 i = 0 ; i < assoc; i++)
+				//{	
+					//int recency = locVal[i];
+					//if(recency != 0 ){
+						////if( range == 0 && recency == 1) recency = 0;
+						////set->read_line(i, 0, read_buff, 64, false);
+						////std::memcpy(blk->data, pkt->getConstPtr<uint8_t>(), blkSize);
+						//enc_d = encodingCompare_2bit(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, thres, encodingSize);
+						
+						//if(options == 1 ){
+							//if(loc_weight >= 1024 )
+								//curfb = lineCompare(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]); // old line_compare
+							//else if(loc_weight >= 512 ) // 2bit
+								//curfb = lineCompare_2bit_mapping(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+							//else // flip MSB 1 bit
+								//curfb = lineCompare_2bit(sets[set].blks[i]->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+							//pq.push(1.92*curfb[1]+ 1.92*curfb[3] + 3.192*curfb[2] + 3.192*curfb[3]);
+						//}
+						//double cur = 10*(enc_d/numSeg) + diverse_weight*(enc_d%numSeg) + recency * (loc_weight % 512);
+						
+					////	if(enc_d < 7 )
+					////		cur = 0 + recency * (loc_weight % 512);
+						////int t = (8 * encodingSize) * hd  + recency * loc_weight;
+						////std::cout<< i <<" diff "<<t<<" bits "<<(uint8_t)read_buff[0]<<std::endl;
+						//if(cur < lowestDiffBits || ( cur == lowestDiffBits && recency < cur_recency)) { 
+						////std::cout<< i <<" diff "<<t<<std::endl;
+							////low_en = 1.084*fb[1]+ 1.084*fb[3] + 2.653*fb[2] + 2.653*fb[3];
+							//fb = curfb; 
+							//lowestDiffBits = cur; 
+							//min_index = i;
+							//cur_hd = enc_d;
+							//cur_recency = recency;
+						//}
+					//}
+				//}
+				//int rank = 1;
+				//if( options == 1 )
+					//while( !pq.empty() && (1.92*fb[1]+ 1.92*fb[3] + 3.192*fb[2] + 3.192*fb[3]) > pq.top()){
+						//pq.pop();
+						//rank++;
+					//}
+				//totalRanks[rank] += 1;
+				//idx = min_index;
+				//blk = sets[set].blks[idx];
+				
+				//while (blk->way >= allocAssoc) {
+					//idx = (idx + 1) % assoc;
+					//blk = sets[set].blks[idx];
+				//}
+
+				//assert(idx < assoc);
+				//assert(idx >= 0);
+				//assert(blk->way < allocAssoc);
+				
+		////assert(!blk || blk->way < allocAssoc);
+				//if(options == 0) {
+					//if(loc_weight >= 1024 )
+						//fb = lineCompare(blk->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]); // old line_compare
+					//else if(loc_weight >= 512 ) // 2bit
+						//fb = lineCompare_2bit_mapping(blk->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+					//else // flip MSB 1 bit
+						//fb = lineCompare_2bit(blk->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+				//}
+			////std::cout<<cur_hd<<std::endl;
+		////totalFlipbits[cur_hd] += fb;
+				//totalZT[cur_hd] += fb[0];
+				//totalST[cur_hd] += fb[1];
+				//totalHT[cur_hd] += fb[2];
+				//totalTT[cur_hd] += fb[3];
+				//totalReps[enc_d] += 1;
+				//sets[set].flipBits[idx] = fb[4];
+				////totalZT[numSeg*numSeg + 1] += fb[0]; 
+				////totalST[numSeg*numSeg + 1] += fb[1];
+				////totalHT[numSeg*numSeg + 1] += fb[2];
+				////totalZT[numSeg*numSeg + 1] += fb[3];
+				
+				////avgZT[cur_hd] = fb[0];
+				////avgST[cur_hd] = fb[1];
+				////avgHT[cur_hd] = fb[2];
+				////avgTT[cur_hd] = fb[3];
+				
+				////avgZT[numSeg*numSeg + 1] = fb[0];
+				////avgST[numSeg*numSeg + 1] = fb[1];
+				////avgHT[numSeg*numSeg + 1] = fb[2];
+				////avgTT[numSeg*numSeg + 1] = fb[3];
+					////avgFlipbits[cur_hd] = fb;
+				//DPRINTF(CacheRepl, "set %x: selecting blk %x for plru replacement with hd = %d %d %d %d \n", set, regenerateBlkAddr(blk->tag, set), cur_hd, fb[0], fb[1], fb[2], fb[3]);
+			//}	
+		//}else{
+			
+				//if(loc_weight >= 1024 )
+					//fb = lineCompare(blk->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]); // old line_compare
+				//else if(loc_weight >= 512 ) // 2bit
+					//fb = lineCompare_2bit_mapping(blk->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+				//else // flip MSB 1 bit
+					//fb = lineCompare_2bit(blk->data, pkt->getConstPtr<uint8_t>(), 64, shiftSize, flipSize, sets[set].flipBits[idx]);
+			
+			//sets[set].flipBits[idx] = fb[4];
+			//totalZT[271] += fb[0];
+			//totalST[271] += fb[1];
+			//totalHT[271] += fb[2];
+			//totalTT[271] += fb[3];
+			//totalInvalidFill += 1;
+			////avgZT[numSeg*numSeg - 1] = fb[0];
+			////avgST[numSeg*numSeg - 1] = fb[1];
+			////avgHT[numSeg*numSeg - 1] = fb[2];
+			////avgTT[numSeg*numSeg - 1] = fb[3];
+			////avgZT[numSeg*numSeg + 1] = fb[0];
+			////avgST[numSeg*numSeg + 1] = fb[1];
+			////avgHT[numSeg*numSeg + 1] = fb[2];
+			////avgTT[numSeg*numSeg + 1] = fb[3];
+			//DPRINTF(CacheRepl, "set %x: selecting blk %x for plru replacement a invalid one with hd = %d %d %d %d \n", set, regenerateBlkAddr(blk->tag, set), 0, fb[0], fb[1], fb[2], fb[3]);	
+	//}
+		////DPRINTF(CacheRepl, "set %x: selecting blk %x for plru replacement with \n", set, regenerateBlkAddr(blk->tag, set));
+			
+		//return blk;
+//}
+
+
+
+CacheBlk*
+SEC::findVictimPLRU(Addr addr, PacketPtr pkt)
+{
+    int set = extractSet(addr);
+    // grab a replacement candidate
+    BlkType *blk = nullptr;
+    
+    for (int i = assoc - 1; i >= 0; i--) {
+        BlkType *b = sets[set].blks[i];
+        if (b->way < allocAssoc) {
+            blk = b;
+            break;
+        }
+    }
+    assert(!blk || blk->way < allocAssoc);
+    int retValue = -1;
+    
+    if (blk && blk->isValid()) {//replacement process
+	
+	
+	   if( assoc == 1 ) retValue = 0;
+	   if (assoc == 4)
+	   {
+		  if (sets[set].m_tree[0] == 0)
+		  {
+			 if (sets[set].m_tree[1] == 0) retValue = 0;
+			 else           retValue = 1;   // b1==1
+		  }
+		  else
+		  {
+			 if (sets[set].m_tree[2] == 0) retValue = 2;
+			 else           retValue = 3;   // b2==1
+		  }
+	   }
+	   else if (assoc == 8)
+	   {
+		  if (sets[set].m_tree[0] == 0)
+		  {  
+			 if (sets[set].m_tree[1] == 0)
+			 {
+				if (sets[set].m_tree[2] == 0) retValue= 0;
+				else           retValue= 1;  // b2==1
+			 }
+			 else
+			 {                            // b1==1
+				if (sets[set].m_tree[3] == 0) retValue = 2;
+				else           retValue = 3;  // b3==1
+			 }
+		  }
+		  else
+		  {                               // b0==1
+			 if (sets[set].m_tree[4] == 0)
+			 {
+				if (sets[set].m_tree[5] == 0) retValue = 4;
+				else           retValue = 5;  // b5==1
+			 }
+			 else
+			 {                            // b4==1
+				if (sets[set].m_tree[6] == 0) retValue = 6;
+				else           retValue = 7;  // b6==1
+			 }
+		  }
+	   }
+	   else if (assoc == 16)
+	   {
+		  if (sets[set].m_tree[0] == 0)
+			  {
+				  if (sets[set].m_tree[1] == 0)
+				  {
+					 if (sets[set].m_tree[2] == 0)
+					 {
+						if (sets[set].m_tree[3] == 0) retValue= 0;
+						else           retValue= 1;  // b2==1
+					 }
+					 else
+					 {                            // b1==1
+						if (sets[set].m_tree[4] == 0) retValue = 2;
+						else           retValue = 3;  // b3==1
+					 }
+				  }
+				  else
+				  {                               // b0==1
+					 if (sets[set].m_tree[5] == 0)
+					 {
+						if (sets[set].m_tree[6] == 0) retValue = 4;
+						else           retValue = 5;  // b5==1
+					 }
+					 else
+					 {                            // b4==1
+						if (sets[set].m_tree[7] == 0) retValue = 6;
+						else           retValue = 7;  // b6==1
+					 }
+				  }
+				}
+				else{
+				  if (sets[set].m_tree[8] == 0)
+				  {
+					 if (sets[set].m_tree[9] == 0)
+					 {
+						if (sets[set].m_tree[10] == 0) retValue= 8;
+						else           retValue= 9;  // b2==1
+					 }
+					 else
+					 {                            // b1==1
+						if (sets[set].m_tree[11] == 0) retValue = 10;
+						else           retValue = 11;  // b3==1
+					 }
+				  }
+				  else
+				  {                               // b0==1
+					 if (sets[set].m_tree[12] == 0)
+					 {
+						if (sets[set].m_tree[13] == 0) retValue = 12;
+						else           retValue = 13;  // b5==1
+					 }
+					 else
+					 {                            // b4==1
+						if (sets[set].m_tree[14] == 0) retValue = 14;
+						else           retValue = 15;  // b6==1
+					 }
+				  }
+				}
+			}
+		else if (assoc == 32)
+		{
+			  if( sets[set].m_tree[0] == 0 ){
+				  
+				  if( sets[set].m_tree[1] == 0 )
+				  {
+					  if (sets[set].m_tree[2] == 0)
+					  {
+						 if (sets[set].m_tree[3] == 0)
+						 {
+							if (sets[set].m_tree[4] == 0) retValue= 0;
+							else           retValue= 1;  // b2==1
+						 }
+						 else
+						 {                            // b1==1
+							if (sets[set].m_tree[5] == 0) retValue = 2;
+							else           retValue = 3;  // b3==1
+						 }
+					  }
+					  else
+					  {                               // b0==1
+						 if (sets[set].m_tree[6] == 0)
+						 {
+							if (sets[set].m_tree[7] == 0) retValue = 4;
+							else           retValue = 5;  // b5==1
+						 }
+						 else
+						 {                            // b4==1
+							if (sets[set].m_tree[8] == 0) retValue = 6;
+							else           retValue = 7;  // b6==1
+						 }
+					  }
+					}
+					else{
+					  if (sets[set].m_tree[9] == 0)
+					  {
+						 if (sets[set].m_tree[10] == 0)
+						 {
+							if (sets[set].m_tree[11] == 0) retValue= 8;
+							else           retValue= 9;  // b2==1
+						 }
+						 else
+						 {                            // b1==1
+							if (sets[set].m_tree[12] == 0) retValue = 10;
+							else           retValue = 11;  // b3==1
+						 }
+					  }
+					  else
+					  {                               // b0==1
+						 if (sets[set].m_tree[13] == 0)
+						 {
+							if (sets[set].m_tree[14] == 0) retValue = 12;
+							else           retValue = 13;  // b5==1
+						 }
+						 else
+						 {                            // b4==1
+							if (sets[set].m_tree[15] == 0) retValue = 14;
+							else           retValue = 15;  // b6==1
+						 }
+					  }
+					}
+				}
+				else{
+					if( sets[set].m_tree[16] == 0 )
+					{
+					  if (sets[set].m_tree[17] == 0)
+					  {
+						 if (sets[set].m_tree[18] == 0)
+						 {
+							if (sets[set].m_tree[19] == 0) retValue= 16;
+							else            retValue= 17;  // b2==1
+						 }
+						 else
+						 {                            // b1==1
+							if (sets[set].m_tree[20] == 0) retValue = 18;
+							else           retValue = 19;  // b3==1
+						 }
+					  }
+					  else
+					  {                               // b0==1
+						 if (sets[set].m_tree[21] == 0)
+						 {
+							if (sets[set].m_tree[22] == 0) retValue = 20;
+							else           retValue = 21;  // b5==1
+						 }
+						 else
+						 {                            // b4==1
+							if (sets[set].m_tree[23] == 0) retValue = 22;
+							else           retValue = 23;  // b6==1
+						 }
+					  }
+					}
+					else{
+					  if (sets[set].m_tree[24] == 0)
+					  {
+						 if (sets[set].m_tree[25] == 0)
+						 {
+							if (sets[set].m_tree[26] == 0) retValue= 24;
+							else           retValue= 25;  // b2==1
+						 }
+						 else
+						 {                            // b1==1
+							if (sets[set].m_tree[27] == 0) retValue = 26;
+							else           retValue = 27;  // b3==1
+						 }
+					  }
+					  else
+					  {                               // b0==1
+						 if (sets[set].m_tree[28] == 0)
+						 {
+							if (sets[set].m_tree[29] == 0) retValue = 28;
+							else           retValue = 29;  // b5==1
+						 }
+						 else
+						 {                            // b4==1
+							if (sets[set].m_tree[30] == 0) retValue = 30;
+							else           retValue = 31;  // b6==1
+						 }
+					  }
+					}
+				}
+			}
+		
+	 blk = sets[set].blks[retValue];	
+     DPRINTF(CacheRepl, "set %x: selecting blk %x for plru replacement\n",
+                set, regenerateBlkAddr(blk->tag, set));
+    }
+    
+    return blk;
+}
+
+void
+SEC::insertBlock(PacketPtr pkt, BlkType *blk)
+{
+    BaseSetAssoc::insertBlock(pkt, blk);
+    blk->dictionary.clear();
+	int idx =  assoc - 1;
+	int secCnt = 0;
+	int compressedScheme = 0;
+	int nearbyCompressedScheme = 0;
+	int set = extractSet(pkt->getAddr());
+	unordered_map<uint64_t, int> full_entries;
+	unordered_map<uint64_t, int> partial_entries;
+	BaseSetAssoc::extractDict(blk->data, full_entries, 64, entrySize, 0);
+	BaseSetAssoc::extractDict(blk->data, partial_entries, 64, entrySize, 4);
+	unordered_map<uint64_t, int> sector_full(full_entries); 
+	int blkCnt = 0;
+    for (; idx >= 0; idx--) { 
+        BlkType *b = sets[set].blks[idx];
+        if ( b->way < allocAssoc && b->isValid()) {
+			blkCnt ++;
+            if( ((b->tag) >>secShift) ==  ((blk->tag) >>secShift)){ // we found one from the same sector			
+				//std::cout<<std::hex << b->tag << " " << blk->tag<<"|";
+				secCnt++;
+				BaseSetAssoc::extractDict(b->data, sector_full, 65, entrySize, 0);
+				//if( b->dictionary.size() > compressThres ) // no compressible
+				//	extractDict(blk, blk->dictionary, 64, entrySize, 0);
+				//else
+				unordered_map<uint64_t, int> temp(full_entries); 
+				BaseSetAssoc::extractDict(b->data, temp, 65, entrySize, 0);
+				if(temp.size() <= 8 ) nearbyCompressedScheme = 1; // 1 means compressible
+				temp = partial_entries; 
+				BaseSetAssoc::extractDict(b->data, temp, 65, entrySize, 4);
+				if(temp.size() <= 4 ) nearbyCompressedScheme = 1;				
+			}
+			if(compressedScheme == 0 and (full_entries.size() <= 8 or partial_entries.size() <= 4 ) ){
+				unordered_map<uint64_t, int> temp(full_entries); 
+				BaseSetAssoc::extractDict(b->data, temp, 64, entrySize, 0);
+				if(temp.size() <= 8 ) compressedScheme += 1;
+				temp = partial_entries; 
+				BaseSetAssoc::extractDict(b->data, temp, 64, entrySize, 4);
+				if(temp.size() <= 4 ) compressedScheme += 2;
+			}
+        }	
+	}
+    if (secCnt > secSize)
+			std::cout<< "too ,many blocks in" << secCnt << " secSize " <<secSize<< std::endl;
+    blkInSec[secCnt] ++;
+	//sectorEntries[secCnt] += blk->dictionary.size();
+	if(sector_full.size() > 16 )
+		entInSec[17] ++;
+    else{
+		blkInSec[secCnt + 10] ++; //entra counting for small sector
+		TotalEntries[secCnt] += sector_full.size();
+		entInSec[sector_full.size()] ++;
+	}
+	if(blkCnt > 29)
+		compressCnt[compressedScheme + 4]++;
+	else
+		compressCnt[compressedScheme]++;
+	if(secCnt == 0)
+		nearbyCompressCnt[0]++;
+	else
+		nearbyCompressCnt[ nearbyCompressedScheme + 1 ]++;
+    sets[set].moveToHead(blk);
+}
+
+void
+SEC::invalidate(CacheBlk *blk)
+{
+    BaseSetAssoc::invalidate(blk);
+
+    // should be evicted before valid blocks
+    int set = blk->set;
+    sets[set].moveToTail(blk);
+}
+
+SEC*
+SECParams::create()
+{
+    return new SEC(this);
+}
